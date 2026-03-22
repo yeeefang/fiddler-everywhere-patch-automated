@@ -441,14 +441,14 @@ jobs:
       - name: Extract app bundle from DMG
         id: extract-fe
         run: |
-          New-Item -ItemType Directory -Path "fe_mount" -Force | Out-Null
           New-Item -ItemType Directory -Path "FE" -Force | Out-Null
-
-          $mountPoint = (Resolve-Path "fe_mount").Path
+          $mountRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { (Resolve-Path ".").Path }
+          $mountPoint = Join-Path $mountRoot "fe_mount_$([guid]::NewGuid().ToString('N'))"
+          New-Item -ItemType Directory -Path $mountPoint -Force | Out-Null
           'Y' | hdiutil attach "FiddlerEverywhereSetup.dmg" -mountpoint $mountPoint -nobrowse
 
           try {
-            $appBundle = Get-ChildItem -Path "fe_mount" -Filter "*.app" | Select-Object -First 1
+            $appBundle = Get-ChildItem -Path $mountPoint -Filter "*.app" | Select-Object -First 1
 
             if (-not $appBundle) {
               throw "Could not find a macOS .app bundle inside the mounted DMG."
@@ -459,7 +459,31 @@ jobs:
 
             "app_bundle_name=$($appBundle.Name)" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
           } finally {
-            hdiutil detach $mountPoint
+            $appBundle = $null
+            Start-Sleep -Seconds 2
+
+            $detached = $false
+            for ($attempt = 1; $attempt -le 5 -and -not $detached; $attempt++) {
+              hdiutil detach $mountPoint
+              if ($LASTEXITCODE -eq 0) {
+                $detached = $true
+              } else {
+                Write-Warning "Detach attempt $attempt failed for $mountPoint; retrying..."
+                Start-Sleep -Seconds 2
+              }
+            }
+
+            if (-not $detached) {
+              Write-Warning "Falling back to forced detach for $mountPoint"
+              hdiutil detach $mountPoint -force
+              if ($LASTEXITCODE -ne 0) {
+                throw "Failed to detach DMG mount point: $mountPoint"
+              }
+            }
+
+            if (Test-Path $mountPoint) {
+              Remove-Item -Path $mountPoint -Recurse -Force -ErrorAction SilentlyContinue
+            }
           }
 
       - name: Patch macOS shared library
